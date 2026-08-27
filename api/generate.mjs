@@ -24,6 +24,11 @@
 //                             allowlisted included — it protects the key.
 //   SPEND_TOTAL_USD           lifetime hard stop on estimated spend (default
 //                             100) for keys with a fixed credit balance
+//   GEMINI_API_KEY_BACKUP     optional second key, tried automatically when
+//                             the primary fails (auth, quota, outage)
+//   RESEND_API_KEY/REPORT_EMAIL  incident alerts: the first time per day a
+//                             valid user is failed (cap trip, dead key, Gemini
+//                             outage), the owner gets an email
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const TOKEN_RE = /^[a-f0-9-]{36}$/;
@@ -174,6 +179,54 @@ function sanitizeRequest(body) {
   return sanitized;
 }
 
+// Statuses where retrying with a different key can help: network failure,
+// bad/revoked key, key quota exhausted, provider outage. A 400 is the
+// request's fault, not the key's — never retried.
+export function failoverWorthy(status) {
+  return status === null || status === 401 || status === 403 || status === 429 || status >= 500;
+}
+
+async function callGemini(model, body, key) {
+  try {
+    return await fetch(`${GEMINI_BASE}/${model}:generateContent`, {
+      method: "POST",
+      // Key travels in a header, not the URL — URLs leak into logs.
+      headers: { "content-type": "application/json", "x-goog-api-key": key },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return null;
+  }
+}
+
+// Incident alerts: the first occurrence of a type per UTC day emails the
+// owner (deduped via KV SETNX). Alerting must never break or stall
+// generation — every failure is swallowed, and callers bound the await.
+async function notifyIncident(creds, type, detail) {
+  try {
+    if (!process.env.RESEND_API_KEY || !process.env.REPORT_EMAIL) return;
+    if (creds) {
+      const fresh = await kv(creds, "set", `alert:${type}:${today()}`, "1", "EX", String(DAY_TTL_S), "NX");
+      if (fresh !== "OK") return;
+    }
+    await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        from: process.env.REPORT_FROM || "Shelve <onboarding@resend.dev>",
+        to: [process.env.REPORT_EMAIL],
+        subject: `Shelve alert: ${type}`,
+        text: `${detail}\n\nFirst occurrence today (UTC); further ${type} incidents today are not re-sent.\nDashboard: https://tryshelve.com/admin`,
+      }),
+    });
+  } catch {
+    // Alerting is best-effort by design.
+  }
+}
+
+const boundedAlert = (creds, type, detail) =>
+  Promise.race([notifyIncident(creds, type, detail), new Promise((resolve) => setTimeout(resolve, 1500))]);
+
 function today() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -238,6 +291,11 @@ export default async function handler(req, res) {
       const monthCapMicro = Number(process.env.SPEND_MONTHLY_USD || "10") * 1e6;
       const totalCapMicro = Number(process.env.SPEND_TOTAL_USD || "100") * 1e6;
       if (monthMicro >= monthCapMicro || totalMicro >= totalCapMicro) {
+        await boundedAlert(
+          creds,
+          "budget_cap",
+          `A spend cap tripped and the free tier is paused. Month: $${(monthMicro / 1e6).toFixed(2)} of $${monthCapMicro / 1e6}. Lifetime: $${(totalMicro / 1e6).toFixed(2)} of $${totalCapMicro / 1e6}. Raise SPEND_MONTHLY_USD / SPEND_TOTAL_USD in Vercel to resume.`
+        );
         return res.status(503).json({ error: "capacity", retryTomorrow: true });
       }
     } catch {
@@ -254,8 +312,12 @@ export default async function handler(req, res) {
   let used = 0;
   if (!allowlisted) {
     try {
-      const globalRes = await reserve(creds, `g:${today()}`, Number(process.env.GLOBAL_DAILY || "3000"), DAY_TTL_S);
-      if (!globalRes.ok) return res.status(503).json({ error: "capacity", retryTomorrow: true });
+      const globalDaily = Number(process.env.GLOBAL_DAILY || "3000");
+      const globalRes = await reserve(creds, `g:${today()}`, globalDaily, DAY_TTL_S);
+      if (!globalRes.ok) {
+        await boundedAlert(creds, "global_cap", `GLOBAL_DAILY (${globalDaily}) reached — the free tier is paused until midnight UTC. Raise it in Vercel if this is legitimate demand.`);
+        return res.status(503).json({ error: "capacity", retryTomorrow: true });
+      }
       reservedKeys.push(`g:${today()}`);
 
       const paid = await kv(creds, "get", `paid:${token}`);
@@ -286,26 +348,50 @@ export default async function handler(req, res) {
   }
 
   const model = process.env.MODEL || "gemini-3.1-flash-lite";
-  let upstream;
-  try {
-    upstream = await fetch(`${GEMINI_BASE}/${model}:generateContent`, {
-      method: "POST",
-      // Key travels in a header, not the URL — URLs leak into logs.
-      headers: { "content-type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY },
-      body: JSON.stringify(sanitized),
-    });
-  } catch {
-    upstream = null;
+  let upstream = await callGemini(model, sanitized, process.env.GEMINI_API_KEY);
+  let servedByBackup = false;
+  const backupKey = process.env.GEMINI_API_KEY_BACKUP;
+  if (backupKey && failoverWorthy(upstream ? upstream.status : null)) {
+    const failedStatus = upstream ? upstream.status : "network error";
+    const second = await callGemini(model, sanitized, backupKey);
+    if (second) upstream = second;
+    servedByBackup = Boolean(second?.ok);
+    if (servedByBackup) {
+      await boundedAlert(creds, "key_failover", `The primary Gemini key failed (${failedStatus}); the backup key served the request. Users are unaffected, but check the primary key.`);
+    }
   }
 
-  // Refund reservations only for outages (network failure, 5xx, provider rate
-  // limit) — a 4xx the sanitizer let through still burns quota, otherwise a
-  // crafted Gemini-invalid request becomes an infinitely retryable free call.
-  const refundable = !upstream || upstream.status >= 500 || upstream.status === 429;
+  // Refund reservations only when the failure is ours or Gemini's (network,
+  // auth, quota, 5xx) — a 400 the sanitizer let through still burns quota,
+  // otherwise a crafted Gemini-invalid request becomes an infinitely
+  // retryable free call.
+  const refundable = failoverWorthy(upstream ? upstream.status : null);
   if (refundable && reservedKeys.length) {
     await Promise.all(reservedKeys.map((key) => kv(creds, "decr", key).catch(() => undefined)));
   }
-  if (!upstream) return res.status(502).json({ error: "provider_unreachable" });
+  if (!upstream) {
+    await boundedAlert(creds, "provider_down", "Gemini is unreachable (network failure on every configured key). Valid users are being turned away.");
+    return res.status(502).json({ error: "provider_unreachable" });
+  }
+  if (failoverWorthy(upstream.status)) {
+    const type = upstream.status === 429 ? "provider_quota" : upstream.status >= 500 ? "provider_5xx" : "provider_auth";
+    await boundedAlert(
+      creds,
+      type,
+      `Gemini returned ${upstream.status} for a valid user request${backupKey ? " on both keys" : ""}. ` +
+        (type === "provider_auth"
+          ? "The API key looks dead or revoked — rotate GEMINI_API_KEY in Vercel."
+          : type === "provider_quota"
+            ? "The key's own quota/credits are exhausted."
+            : "Provider-side outage; usually transient.")
+    );
+    // The key's problem, not the user's: report tier-neutral capacity so the
+    // extension never tells a user their quota ran out when the key died.
+    // 5xx passes through as-is (transient, worth the client retry).
+    if (upstream.status < 500) {
+      return res.status(503).json({ error: "capacity", retryTomorrow: true });
+    }
+  }
 
   const responseText = await upstream.text();
   // Await (don't fire-and-forget): the serverless runtime may freeze right

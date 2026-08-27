@@ -14,7 +14,8 @@ Landing page, privacy policy, and the serverless relay for [Shelve](https://gith
 
 | Var | Purpose |
 | --- | --- |
-| `GEMINI_API_KEY` | Budget-capped key the proxy calls Gemini with (required) |
+| `GEMINI_API_KEY` | Key the proxy calls Gemini with (required) |
+| `GEMINI_API_KEY_BACKUP` | Optional second key, tried automatically when the primary fails (auth/quota/outage); a `key_failover` alert email fires when it engages |
 | `KV_REST_API_URL` / `KV_REST_API_TOKEN` | Upstash KV (metering + aggregate stats); missing KV fails closed |
 | `ADMIN_SECRET` | Bearer secret for `/api/admin-stats` and `admin.html` |
 | `ALLOW_TOKENS` | Comma-separated install tokens with unlimited actions (owner + friends) |
@@ -37,6 +38,10 @@ Each Shelve install has an anonymous install code (a random UUID — it identifi
 ## Owner dashboard
 
 Open [tryshelve.com/admin](https://tryshelve.com/admin), paste `ADMIN_SECRET`. Shows total/per-day actions for the last 30 days, unique installs, aggregate input/output tokens, and estimated Gemini cost. All numbers are aggregates — there is nothing per-user to see.
+
+## Incident alerts
+
+With `RESEND_API_KEY` + `REPORT_EMAIL` set, `api/generate.mjs` emails the owner the **first time each incident type occurs per UTC day** (deduped in KV): `budget_cap` (spend cap tripped), `global_cap` (GLOBAL_DAILY reached), `provider_auth` (key dead/revoked), `provider_quota` (key's own credits exhausted), `provider_5xx`, `provider_down` (unreachable), `key_failover` (backup key engaged). Provider auth/quota failures are reported to clients as tier-neutral `capacity` and the user's action is refunded — users never get blamed for a dead key.
 
 ## Daily report + budget guardrails
 
