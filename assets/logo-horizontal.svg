@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 96">
+  <g>
+    <rect x="16" y="26" width="10" height="34" rx="3" fill="#35513F"/>
+    <rect x="31" y="20" width="10" height="40" rx="3" fill="#C7A65B"/>
+    <rect x="46" y="26" width="10" height="34" rx="3" fill="#35513F"/>
+    <rect x="12" y="64" width="48" height="6" rx="3" fill="#35513F"/>
+  </g>
+  <text x="80" y="60" font-family="Geist, Georgia, serif" font-size="42" font-weight="600" letter-spacing="-1" fill="#35513F">Shelve</text>
+</svg>

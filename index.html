@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400&display=swap" rel="stylesheet">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
 <style>
   :root {
     --bg: #faf9f6;
@@ -27,8 +28,8 @@
   }
   .wrap { max-width: 640px; margin: 0 auto; padding: 0 24px; }
   header { display: flex; justify-content: space-between; align-items: center; padding: 28px 0; }
-  .mark { font-weight: 600; font-size: 17px; letter-spacing: -0.01em; }
-  .mark::before { content: ""; display: inline-block; width: 14px; height: 3px; background: var(--accent); border-radius: 2px; margin-right: 8px; vertical-align: 4px; }
+  .mark { font-weight: 600; font-size: 17px; letter-spacing: -0.01em; display: flex; align-items: center; gap: 9px; }
+  .mark img { width: 22px; height: 22px; }
   nav a { color: var(--muted); text-decoration: none; font-size: 14px; margin-left: 20px; }
   nav a:hover { color: var(--ink); }
   .hero { padding: 64px 0 40px; }
@@ -76,7 +77,7 @@
 <body>
 <div class="wrap">
   <header>
-    <span class="mark">Shelve</span>
+    <span class="mark"><img src="assets/favicon.svg" alt="">Shelve</span>
     <nav>
       <a href="https://github.com/prithvi-bharadwaj/shelve">GitHub</a>
       <a href="privacy.html">Privacy</a>
