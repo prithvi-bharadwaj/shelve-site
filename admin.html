@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex" />
+  <title>Shelve — usage</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; background: #0b0d10; color: #e6e8eb; max-width: 720px; margin: 3rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.1rem; letter-spacing: -0.01em; }
+    input { background: #14171c; color: inherit; border: 1px solid #2a2f37; border-radius: 6px; padding: 0.45rem 0.6rem; width: 16rem; }
+    button { background: #1d232b; color: inherit; border: 1px solid #2a2f37; border-radius: 6px; padding: 0.45rem 0.9rem; cursor: pointer; }
+    button:hover { border-color: #4a5462; }
+    .cards { display: flex; gap: 0.75rem; flex-wrap: wrap; margin: 1.25rem 0; }
+    .card { background: #12151a; border: 1px solid #232830; border-radius: 8px; padding: 0.75rem 1rem; min-width: 8.5rem; }
+    .card b { display: block; font-size: 1.3rem; font-variant-numeric: tabular-nums; }
+    .card span { color: #8b94a1; font-size: 0.78rem; }
+    table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+    th, td { text-align: right; padding: 0.3rem 0.6rem; border-bottom: 1px solid #1c2128; }
+    th:first-child, td:first-child { text-align: left; }
+    th { color: #8b94a1; font-weight: 500; font-size: 0.78rem; }
+    #status { color: #8b94a1; margin: 1rem 0; }
+    .error { color: #f0857b; }
+  </style>
+</head>
+<body>
+  <h1>Shelve usage &amp; cost</h1>
+  <form id="auth">
+    <input id="secret" type="password" placeholder="Admin secret" autocomplete="off" />
+    <button type="submit">Load</button>
+  </form>
+  <p id="status"></p>
+  <div id="out" hidden>
+    <div class="cards">
+      <div class="card"><b id="t-actions"></b><span>actions (30d)</span></div>
+      <div class="card"><b id="t-installs"></b><span>unique installs</span></div>
+      <div class="card"><b id="t-in"></b><span>input tokens (30d)</span></div>
+      <div class="card"><b id="t-out"></b><span>output tokens (30d)</span></div>
+      <div class="card"><b id="t-cost"></b><span>est. cost (30d)</span></div>
+    </div>
+    <table>
+      <thead><tr><th>Day</th><th>Actions</th><th>In tokens</th><th>Out tokens</th><th>Est. $</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const fmt = (n) => Number(n).toLocaleString("en-US");
+
+    async function load(secret) {
+      $("status").textContent = "Loading…";
+      $("status").classList.remove("error");
+      let resp;
+      try {
+        resp = await fetch("/api/admin-stats", { headers: { Authorization: "Bearer " + secret } });
+      } catch {
+        resp = null;
+      }
+      if (!resp || !resp.ok) {
+        $("out").hidden = true;
+        $("status").textContent = !resp ? "Network error." : resp.status === 401 ? "Wrong secret." : "Error " + resp.status + ".";
+        $("status").classList.add("error");
+        sessionStorage.removeItem("adminSecret");
+        return;
+      }
+      const data = await resp.json();
+      sessionStorage.setItem("adminSecret", secret);
+      $("t-actions").textContent = fmt(data.totals.actions);
+      $("t-installs").textContent = fmt(data.uniqueInstalls7d) + " (7d) · " + fmt(data.uniqueInstallsToday) + " today";
+      $("t-in").textContent = fmt(data.totals.inputTokens);
+      $("t-out").textContent = fmt(data.totals.outputTokens);
+      $("t-cost").textContent = "$" + data.totals.estCostUsd.toFixed(2);
+      $("rows").replaceChildren(...data.days.filter((d) => d.actions > 0).map((d) => {
+        const tr = document.createElement("tr");
+        for (const value of [d.date, fmt(d.actions), fmt(d.inputTokens), fmt(d.outputTokens), "$" + d.estCostUsd.toFixed(4)]) {
+          const td = document.createElement("td");
+          td.textContent = value;
+          tr.appendChild(td);
+        }
+        return tr;
+      }));
+      $("out").hidden = false;
+      $("status").textContent = "As of " + new Date(data.generatedAt).toLocaleString();
+    }
+
+    $("auth").addEventListener("submit", (event) => {
+      event.preventDefault();
+      if ($("secret").value) load($("secret").value);
+    });
+    const saved = sessionStorage.getItem("adminSecret");
+    if (saved) { $("secret").value = saved; load(saved); }
+  </script>
+</body>
+</html>
