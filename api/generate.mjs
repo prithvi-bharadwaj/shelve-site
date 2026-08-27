@@ -11,8 +11,10 @@
 //   KV_REST_API_URL/TOKEN     Upstash REST (Vercel KV). Missing KV now fails
 //                             CLOSED (503) — an unmetered open proxy is worse
 //                             than a briefly broken free tier.
-//   FREE_ACTIONS              lifetime free actions per install (default 10)
-//   FREE_DAILY                free actions per day per install (default 6)
+//   FREE_DAILY                free actions per day per install (default 30)
+//   GLOBAL_DAILY              circuit breaker: total actions/day across all
+//                             installs (default 3000) — the real cap on token
+//                             farming, since per-token caps can't stop minting
 //   PAID_MONTHLY              actions per month for paid tokens (default 1500)
 //   ALLOW_TOKENS              comma-separated unlimited tokens (owner+friends)
 //   MODEL                     pinned model (default gemini-3.1-flash-lite)
@@ -24,9 +26,11 @@ const TTL_S = 60 * 60 * 24 * 90;
 // Sized to the extension's legitimate traffic (40 tabs + snippets), not to
 // what a caller might wish for. Everything outside the whitelist is dropped.
 const LIMITS = {
-  bodyBytes: 64_000, // hard reject above this
-  systemChars: 4_000, // silent crop — organize prompts are ~2-3K
-  contentChars: 48_000, // ~12K tokens of tab titles/URLs/snippets
+  bodyBytes: 96_000, // hard reject above this
+  // Measured: typical organize prompt ~750 chars; worst legitimate case
+  // (monochrome list + 2K custom instructions + many existing groups) ~4.3K.
+  systemChars: 6_000, // silent crop with headroom over the legit worst case
+  contentChars: 64_000, // ~16K tokens — 75 tabs with snippets fits with room
   contentTurns: 2,
   maxOutputTokens: 1024,
 };
@@ -116,35 +120,35 @@ export default async function handler(req, res) {
   }
 
   // Entitlement tiers: allowlisted > paid (Stripe webhook sets paid:<token>) > free.
+  // Free tier is a generous daily allowance, not a lifetime meter; the global
+  // circuit breaker (not per-token stinginess) is what bounds token farming.
   let tier = "free";
   let used = 0;
-  let limit = Number(process.env.FREE_ACTIONS || "10");
+  let limit = Number(process.env.FREE_DAILY || "30");
   if (allowlisted) {
     tier = "unlimited";
   } else {
     try {
+      const globalUsed = Number((await kv(creds, "get", `g:${today()}`)) || "0");
+      if (globalUsed >= Number(process.env.GLOBAL_DAILY || "3000")) {
+        return res.status(503).json({ error: "capacity", retryTomorrow: true });
+      }
       const paid = await kv(creds, "get", `paid:${token}`);
       if (paid === "active") {
         tier = "paid";
         limit = Number(process.env.PAID_MONTHLY || "1500");
         used = Number((await kv(creds, "get", `m:${token}:${month()}`)) || "0");
+        if (used >= limit) {
+          return res.status(402).json({ error: "paid_quota_exhausted", used, limit });
+        }
       } else {
-        const [lifetime, daily] = await Promise.all([
-          kv(creds, "get", token),
-          kv(creds, "get", `d:${token}:${today()}`),
-        ]);
-        used = Number(lifetime || "0");
-        const dailyUsed = Number(daily || "0");
-        const dailyLimit = Number(process.env.FREE_DAILY || "6");
-        if (dailyUsed >= dailyLimit && used < limit) {
+        used = Number((await kv(creds, "get", `d:${token}:${today()}`)) || "0");
+        if (used >= limit) {
           return res.status(429).json({ error: "daily_limit", retryTomorrow: true });
         }
       }
     } catch {
       return res.status(503).json({ error: "metering_unavailable" });
-    }
-    if (used >= limit) {
-      return res.status(402).json({ error: tier === "paid" ? "paid_quota_exhausted" : "free_actions_exhausted", used, limit });
     }
   }
 
@@ -165,11 +169,11 @@ export default async function handler(req, res) {
         await kv(creds, "incr", `m:${token}:${month()}`);
         await kv(creds, "expire", `m:${token}:${month()}`, String(TTL_S));
       } else {
-        await kv(creds, "incr", token);
-        await kv(creds, "expire", token, String(TTL_S));
         await kv(creds, "incr", `d:${token}:${today()}`);
         await kv(creds, "expire", `d:${token}:${today()}`, String(60 * 60 * 48));
       }
+      await kv(creds, "incr", `g:${today()}`);
+      await kv(creds, "expire", `g:${today()}`, String(60 * 60 * 48));
     } catch {
       // Metering write failed after a served call: log nothing, next read re-checks.
     }
