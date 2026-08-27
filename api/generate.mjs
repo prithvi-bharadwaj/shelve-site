@@ -86,7 +86,14 @@ async function recordAggregateStats(creds, token, responseText) {
     ["expire", `s:i:${day}`, String(STATS_TTL_S)],
     ["incrby", `s:o:${day}`, String(output)],
     ["expire", `s:o:${day}`, String(STATS_TTL_S)],
-    ["sadd", "s:installs", token],
+    // Per-day unique sets expire with the stats window — an attacker minting
+    // fresh tokens can no longer grow storage without bound.
+    ["sadd", `s:u:${day}`, token],
+    ["expire", `s:u:${day}`, String(STATS_TTL_S)],
+    // Day-granular model marker so the dashboard prices tokens correctly even
+    // if the MODEL env changes mid-window.
+    ["set", `s:mdl:${day}`, process.env.MODEL || "gemini-3.1-flash-lite"],
+    ["expire", `s:mdl:${day}`, String(STATS_TTL_S)],
   ]);
 }
 
@@ -252,9 +259,14 @@ export default async function handler(req, res) {
 
   const responseText = await upstream.text();
   // Await (don't fire-and-forget): the serverless runtime may freeze right
-  // after the response is sent, dropping in-flight KV writes.
+  // after the response is sent, dropping in-flight KV writes. But bound it —
+  // best-effort telemetry must never turn a successful generation into a
+  // client-visible stall.
   if (upstream.ok && creds) {
-    await recordAggregateStats(creds, token, responseText).catch(() => undefined);
+    await Promise.race([
+      recordAggregateStats(creds, token, responseText).catch(() => undefined),
+      new Promise((resolve) => setTimeout(resolve, 1500)),
+    ]);
   }
 
   const remaining = tier === "unlimited" ? "unlimited" : String(Math.max(0, limit - (upstream.ok ? used : used - 1)));

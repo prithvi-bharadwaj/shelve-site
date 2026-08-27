@@ -7,9 +7,15 @@
 
 import { timingSafeEqual } from "node:crypto";
 
-// USD per million tokens for gemini-3.1-flash-lite (the pinned proxy model).
-const PRICE_IN_PER_MTOK = 0.25;
-const PRICE_OUT_PER_MTOK = 1.5;
+// USD per million input/output tokens by model. Days recorded with a model
+// missing from this map report tokens with a null cost rather than a wrong one.
+const PRICES = {
+  "gemini-3.1-flash-lite": [0.25, 1.5],
+  "gemini-2.5-flash-lite": [0.1, 0.4],
+  "gemini-2.5-flash": [0.3, 2.5],
+  "gemini-3.5-flash": [1.5, 9],
+};
+const DEFAULT_MODEL = "gemini-3.1-flash-lite";
 const DAYS = 30;
 
 function kvCreds() {
@@ -46,8 +52,10 @@ function lastDays(count) {
   return days;
 }
 
-function costUsd(inputTokens, outputTokens) {
-  const cost = (inputTokens / 1e6) * PRICE_IN_PER_MTOK + (outputTokens / 1e6) * PRICE_OUT_PER_MTOK;
+function costUsd(inputTokens, outputTokens, model) {
+  const price = PRICES[model];
+  if (!price) return null;
+  const cost = (inputTokens / 1e6) * price[0] + (outputTokens / 1e6) * price[1];
   return Math.round(cost * 10_000) / 10_000;
 }
 
@@ -66,34 +74,39 @@ export default async function handler(req, res) {
       ["mget", ...dates.map((d) => `s:a:${d}`)],
       ["mget", ...dates.map((d) => `s:i:${d}`)],
       ["mget", ...dates.map((d) => `s:o:${d}`)],
-      ["scard", "s:installs"],
+      ["mget", ...dates.map((d) => `s:mdl:${d}`)],
+      ["scard", `s:u:${dates[0]}`],
+      ["sunion", ...dates.slice(0, 7).map((d) => `s:u:${d}`)],
     ]);
   } catch {
     return res.status(502).json({ error: "kv_error" });
   }
 
-  const [actionsRes, inRes, outRes, installsRes] = results.map((r) => r?.result);
+  const [actionsRes, inRes, outRes, modelRes, todayRes, weekRes] = results.map((r) => r?.result);
   const days = dates.map((date, i) => {
     const actions = Number(actionsRes?.[i]) || 0;
     const inputTokens = Number(inRes?.[i]) || 0;
     const outputTokens = Number(outRes?.[i]) || 0;
-    return { date, actions, inputTokens, outputTokens, estCostUsd: costUsd(inputTokens, outputTokens) };
+    const model = modelRes?.[i] || DEFAULT_MODEL;
+    return { date, actions, inputTokens, outputTokens, model, estCostUsd: costUsd(inputTokens, outputTokens, model) };
   });
   const totals = days.reduce(
     (acc, day) => ({
       actions: acc.actions + day.actions,
       inputTokens: acc.inputTokens + day.inputTokens,
       outputTokens: acc.outputTokens + day.outputTokens,
+      estCostUsd: day.estCostUsd === null ? acc.estCostUsd : Math.round((acc.estCostUsd + day.estCostUsd) * 10_000) / 10_000,
     }),
-    { actions: 0, inputTokens: 0, outputTokens: 0 }
+    { actions: 0, inputTokens: 0, outputTokens: 0, estCostUsd: 0 }
   );
 
   res.setHeader("cache-control", "no-store");
   return res.status(200).json({
     generatedAt: new Date().toISOString(),
     windowDays: DAYS,
-    uniqueInstalls: Number(installsRes) || 0,
-    totals: { ...totals, estCostUsd: costUsd(totals.inputTokens, totals.outputTokens) },
+    uniqueInstallsToday: Number(todayRes) || 0,
+    uniqueInstalls7d: Array.isArray(weekRes) ? weekRes.length : 0,
+    totals,
     days,
   });
 }

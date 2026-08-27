@@ -67,7 +67,7 @@
       const data = await resp.json();
       sessionStorage.setItem("adminSecret", secret);
       $("t-actions").textContent = fmt(data.totals.actions);
-      $("t-installs").textContent = fmt(data.uniqueInstalls);
+      $("t-installs").textContent = fmt(data.uniqueInstalls7d) + " (7d) · " + fmt(data.uniqueInstallsToday) + " today";
       $("t-in").textContent = fmt(data.totals.inputTokens);
       $("t-out").textContent = fmt(data.totals.outputTokens);
       $("t-cost").textContent = "$" + data.totals.estCostUsd.toFixed(2);

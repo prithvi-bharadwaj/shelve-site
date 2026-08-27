@@ -75,7 +75,7 @@ test("returns aggregated numbers when KV responds", async () => {
   globalThis.fetch = async (url, options) => {
     assert.equal(url, "https://kv.test/pipeline");
     const commands = JSON.parse(options.body);
-    assert.equal(commands.length, 4);
+    assert.equal(commands.length, 6);
     const zeros = (n) => Array.from({ length: n }, () => null);
     return {
       ok: true,
@@ -83,7 +83,9 @@ test("returns aggregated numbers when KV responds", async () => {
         { result: [ "5", ...zeros(29) ] },
         { result: [ "1000000", ...zeros(29) ] },
         { result: [ "2000000", ...zeros(29) ] },
-        { result: 7 },
+        { result: [ "gemini-3.1-flash-lite", ...zeros(29) ] },
+        { result: 3 },
+        { result: ["t1", "t2", "t3", "t4", "t5", "t6", "t7"] },
       ],
     };
   };
@@ -91,7 +93,8 @@ test("returns aggregated numbers when KV responds", async () => {
     const res = fakeRes();
     await handler(request("Bearer topsecret"), res);
     assert.equal(res.statusCode, 200);
-    assert.equal(res.body.uniqueInstalls, 7);
+    assert.equal(res.body.uniqueInstallsToday, 3);
+    assert.equal(res.body.uniqueInstalls7d, 7);
     assert.equal(res.body.totals.actions, 5);
     assert.equal(res.body.totals.inputTokens, 1_000_000);
     assert.equal(res.body.totals.outputTokens, 2_000_000);
