@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shelve — your browser remembers what you were doing</title>
+<meta name="description" content="One click sorts your open tabs into named groups by intent. Find any tab by describing it. Shelve a project, come back to a brief. Bring your own key — we never see your tabs.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #faf9f6;
+    --ink: #1c1b18;
+    --muted: #6f6b62;
+    --line: #e6e2d9;
+    --accent: #a16207;
+    --card: #ffffff;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Geist", -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 0 24px; }
+  header { display: flex; justify-content: space-between; align-items: center; padding: 28px 0; }
+  .mark { font-weight: 600; font-size: 17px; letter-spacing: -0.01em; }
+  .mark::before { content: ""; display: inline-block; width: 14px; height: 3px; background: var(--accent); border-radius: 2px; margin-right: 8px; vertical-align: 4px; }
+  nav a { color: var(--muted); text-decoration: none; font-size: 14px; margin-left: 20px; }
+  nav a:hover { color: var(--ink); }
+  .hero { padding: 64px 0 40px; }
+  h1 { font-size: clamp(30px, 6vw, 42px); font-weight: 600; letter-spacing: -0.025em; line-height: 1.12; }
+  h1 em { font-style: normal; color: var(--muted); }
+  .sub { margin-top: 18px; font-size: 17px; color: var(--muted); max-width: 34em; }
+  .cta { margin-top: 30px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .btn {
+    display: inline-block; padding: 11px 20px; border-radius: 8px; font-size: 15px; font-weight: 500;
+    text-decoration: none; border: 1px solid var(--ink); color: var(--bg); background: var(--ink);
+  }
+  .btn:hover { background: #33312c; border-color: #33312c; }
+  .cta small { color: var(--muted); font-size: 13px; }
+  .strip {
+    margin: 56px 0 0; padding: 18px; background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; display: flex; flex-wrap: wrap; gap: 8px;
+  }
+  .chip {
+    font-family: "Geist Mono", ui-monospace, monospace; font-size: 12.5px; padding: 6px 12px;
+    border-radius: 999px; border: 1px solid var(--line); color: var(--ink); background: var(--bg);
+  }
+  .chip b { font-weight: 400; color: var(--muted); }
+  .chip::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; }
+  .chip:nth-child(1)::before { background: #2563eb; }
+  .chip:nth-child(2)::before { background: #dc2626; }
+  .chip:nth-child(3)::before { background: #16a34a; }
+  .chip:nth-child(4)::before { background: #9333ea; }
+  .chip:nth-child(5)::before { background: #d97706; }
+  .strip-note { margin-top: 10px; font-size: 13px; color: var(--muted); }
+  section { padding: 44px 0 0; }
+  .feat { padding: 22px 0; border-top: 1px solid var(--line); }
+  .feat h2 { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+  .feat p { margin-top: 6px; color: var(--muted); font-size: 15px; max-width: 36em; }
+  .privacy { margin-top: 56px; padding: 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+  .privacy h2 { font-size: 16px; font-weight: 600; }
+  .privacy p { margin-top: 8px; color: var(--muted); font-size: 15px; }
+  .privacy a { color: var(--accent); }
+  footer { margin-top: 64px; padding: 28px 0 48px; border-top: 1px solid var(--line);
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+    color: var(--muted); font-size: 13.5px; }
+  footer a { color: var(--muted); }
+  footer a:hover { color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="mark">Shelve</span>
+    <nav>
+      <a href="https://github.com/prithvi-bharadwaj/shelve">GitHub</a>
+      <a href="privacy.html">Privacy</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <h1>Your browser remembers what you were doing. <em>Even when you don’t.</em></h1>
+    <p class="sub">One click sorts your open tabs into named groups by what you’re actually doing — not by site. Find any tab by describing it. Shelve a whole project and come back to a brief of where you left off.</p>
+    <div class="cta">
+      <a class="btn" href="https://github.com/prithvi-bharadwaj/shelve/releases/latest/download/shelve.zip">Download for Chrome</a>
+      <small>Free · ~200&nbsp;KB · Chrome Web Store soon</small>
+    </div>
+
+    <div class="strip" aria-hidden="true">
+      <span class="chip">Kyoto trip <b>· 6</b></span>
+      <span class="chip">React bug <b>· 4</b></span>
+      <span class="chip">Investor research <b>· 9</b></span>
+      <span class="chip">Desk shopping <b>· 3</b></span>
+      <span class="chip">Reading <b>· 5</b></span>
+    </div>
+    <p class="strip-note">Forty loose tabs, ten seconds later.</p>
+  </div>
+
+  <section>
+    <div class="feat">
+      <h2>Groups by intent, not by domain</h2>
+      <p>Ten Twitter tabs won’t collapse into one “entertainment” pile. The research thread goes to research; the essay goes to reading. Same site, different jobs, different groups.</p>
+    </div>
+    <div class="feat">
+      <h2>Ask for the tab you can’t find</h2>
+      <p>“The hotel under $200 a night.” “The LinkedIn profile of the Stanford founder.” Describe what you remember and Shelve jumps to it — out of twenty lookalikes.</p>
+    </div>
+    <div class="feat">
+      <h2>Shelve it. Come back to a brief.</h2>
+      <p>Done for the day? A shelved project closes its tabs behind an AI note of where you left off — prices, options, what was still unchecked. Resume reopens everything as a fresh group.</p>
+    </div>
+  </section>
+
+  <div class="privacy">
+    <h2>Bring your own key. We never see your tabs.</h2>
+    <p>Shelve talks directly to the AI provider you choose — OpenAI, Anthropic, Gemini, or a local Ollama. There is no Shelve backend, no account, no analytics. Your API key stays in your browser. The <a href="https://github.com/prithvi-bharadwaj/shelve">source is public</a> so you don’t have to take our word for it.</p>
+  </div>
+
+  <footer>
+    <span>© 2026 Prithvi Bharadwaj</span>
+    <span><a href="privacy.html">Privacy policy</a> · <a href="mailto:prithvi@skive.in">Contact</a> · <a href="https://github.com/prithvi-bharadwaj/shelve/blob/main/LICENSE">PolyForm Shield 1.0.0</a></span>
+  </footer>
+</div>
+</body>
+</html>
