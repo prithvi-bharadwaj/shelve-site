@@ -38,7 +38,7 @@
     <li><strong>Tab titles and URLs.</strong> When you run an AI action (organize, command bar, shelving a group), the titles and URLs of your open tabs are sent directly from your browser to the AI provider <em>you</em> configured — OpenAI, Anthropic, Google Gemini, or your own local Ollama server. They are never sent to us, because there is no us to send them to.</li>
     <li><strong>Page snippets (optional).</strong> If — and only if — you grant the optional page-access permission, Shelve may read a short text snippet from a page to classify an ambiguous tab or to write a shelving brief. Declining this permission leaves title-and-URL organization fully functional. Each AI feature asks you to acknowledge its data use once, before its first request.</li>
     <li><strong>Your API keys.</strong> Stored in <code>chrome.storage.local</code> on your machine, sent only to the matching provider as authentication. Never synced, never transmitted elsewhere.</li>
-    <li><strong>Settings, shelved groups, and usage stats.</strong> Stored locally in your browser. The stats card (tabs sorted, streak) is computed and kept entirely on your device.</li>
+    <li><strong>Settings, shelved groups, and usage stats.</strong> Stored in your browser. Preferences use Chrome's built-in sync, so they follow your own browser profile across your devices; shelved groups, API keys, and the stats card (tabs sorted, streak) never leave the device they're on.</li>
   </ul>
 
   <h2>The hosted free tier (Shelve Free)</h2>
