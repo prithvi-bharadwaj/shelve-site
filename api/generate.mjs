@@ -19,6 +19,11 @@
 //   PAID_MONTHLY              actions per month for paid tokens (default 1500)
 //   ALLOW_TOKENS              comma-separated unlimited tokens (owner+friends)
 //   MODEL                     pinned model (default gemini-3.1-flash-lite)
+//   SPEND_MONTHLY_USD         hard stop on estimated Gemini spend per calendar
+//                             month (default 10). Applies to every caller,
+//                             allowlisted included — it protects the key.
+//   SPEND_TOTAL_USD           lifetime hard stop on estimated spend (default
+//                             100) for keys with a fixed credit balance
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const TOKEN_RE = /^[a-f0-9-]{36}$/;
@@ -38,6 +43,20 @@ const LIMITS = {
   schemaBytes: 8_000, // PLAN_SCHEMA is ~1-2K; a megabyte "schema" is an attack
   maxOutputTokens: 1024,
 };
+
+// USD per million input/output tokens. token count × price-per-Mtok = micro-USD,
+// so spend accumulates in KV as integer microdollars with no float drift.
+const SPEND_PRICES = {
+  "gemini-3.1-flash-lite": [0.25, 1.5],
+  "gemini-2.5-flash-lite": [0.1, 0.4],
+  "gemini-2.5-flash": [0.3, 2.5],
+  "gemini-3.5-flash": [1.5, 9],
+};
+
+export function estimateMicroUsd(inputTokens, outputTokens, model) {
+  const [inPrice, outPrice] = SPEND_PRICES[model] || SPEND_PRICES["gemini-3.1-flash-lite"];
+  return Math.ceil(inputTokens * inPrice + outputTokens * outPrice);
+}
 
 function kvCreds() {
   const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
@@ -79,7 +98,13 @@ async function recordAggregateStats(creds, token, responseText) {
   const input = Number(usage?.promptTokenCount) || 0;
   const output = Number(usage?.candidatesTokenCount) || 0;
   const day = today();
+  const micro = estimateMicroUsd(input, output, process.env.MODEL || "gemini-3.1-flash-lite");
   await kvPipeline(creds, [
+    // Running spend estimate, read by the budget gate below and the daily
+    // report. Monthly key outlives the stats window; total never expires.
+    ["incrby", `s:spend:${month()}`, String(micro)],
+    ["expire", `s:spend:${month()}`, String(60 * 60 * 24 * 62)],
+    ["incrby", "s:spend:total", String(micro)],
     ["incr", `s:a:${day}`],
     ["expire", `s:a:${day}`, String(STATS_TTL_S)],
     ["incrby", `s:i:${day}`, String(input)],
@@ -197,6 +222,27 @@ export default async function handler(req, res) {
   if (!creds && !allowlisted) {
     // Fail closed: no metering means no service, never an open faucet.
     return res.status(503).json({ error: "metering_unavailable" });
+  }
+
+  // Budget gate: the key has a fixed credit balance, so estimated spend is a
+  // hard stop for everyone, allowlisted included. Tier-neutral "capacity"
+  // response — indistinguishable from the global daily breaker.
+  if (creds) {
+    try {
+      const spend = await kvPipeline(creds, [
+        ["get", `s:spend:${month()}`],
+        ["get", "s:spend:total"],
+      ]);
+      const monthMicro = Number(spend?.[0]?.result) || 0;
+      const totalMicro = Number(spend?.[1]?.result) || 0;
+      const monthCapMicro = Number(process.env.SPEND_MONTHLY_USD || "10") * 1e6;
+      const totalCapMicro = Number(process.env.SPEND_TOTAL_USD || "100") * 1e6;
+      if (monthMicro >= monthCapMicro || totalMicro >= totalCapMicro) {
+        return res.status(503).json({ error: "capacity", retryTomorrow: true });
+      }
+    } catch {
+      return res.status(503).json({ error: "metering_unavailable" });
+    }
   }
 
   // Entitlement tiers: allowlisted > paid (Stripe webhook sets paid:<token>) > free.
