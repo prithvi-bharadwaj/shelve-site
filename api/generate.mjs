@@ -288,17 +288,21 @@ export default async function handler(req, res) {
   const model = process.env.MODEL || "gemini-3.1-flash-lite";
   let upstream;
   try {
-    upstream = await fetch(`${GEMINI_BASE}/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+    upstream = await fetch(`${GEMINI_BASE}/${model}:generateContent`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      // Key travels in a header, not the URL — URLs leak into logs.
+      headers: { "content-type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY },
       body: JSON.stringify(sanitized),
     });
   } catch {
     upstream = null;
   }
 
-  // Refund reservations for failed generations — outages must not burn quota.
-  if ((!upstream || !upstream.ok) && reservedKeys.length) {
+  // Refund reservations only for outages (network failure, 5xx, provider rate
+  // limit) — a 4xx the sanitizer let through still burns quota, otherwise a
+  // crafted Gemini-invalid request becomes an infinitely retryable free call.
+  const refundable = !upstream || upstream.status >= 500 || upstream.status === 429;
+  if (refundable && reservedKeys.length) {
     await Promise.all(reservedKeys.map((key) => kv(creds, "decr", key).catch(() => undefined)));
   }
   if (!upstream) return res.status(502).json({ error: "provider_unreachable" });
@@ -315,7 +319,7 @@ export default async function handler(req, res) {
     ]);
   }
 
-  const remaining = tier === "unlimited" ? "unlimited" : String(Math.max(0, limit - (upstream.ok ? used : used - 1)));
+  const remaining = tier === "unlimited" ? "unlimited" : String(Math.max(0, limit - (refundable ? used - 1 : used)));
   res.setHeader("x-shelve-actions-remaining", remaining);
   res.setHeader("content-type", "application/json");
   res.status(upstream.status);
