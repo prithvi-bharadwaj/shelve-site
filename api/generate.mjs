@@ -2,13 +2,13 @@
 // public by nature (any extension's traffic is inspectable), so safety comes
 // from server-side limits, not secrecy.
 //
-// Privacy contract (public): request bodies pass through to Gemini and are
-// never stored. Persisted state is per-token counters and entitlement flags
-// only. No URLs, titles, IPs, or request content are written.
+// Privacy contract (public, mirrored in /privacy): request bodies pass through
+// to Gemini and are never stored. Persisted state is per-token counters and
+// entitlement flags only. No URLs, titles, IPs, or request content are written.
 //
 // Env:
 //   GEMINI_API_KEY            required, budget-capped key
-//   KV_REST_API_URL/TOKEN     Upstash REST (Vercel KV). Missing KV now fails
+//   KV_REST_API_URL/TOKEN     Upstash REST (Vercel KV). Missing KV fails
 //                             CLOSED (503) — an unmetered open proxy is worse
 //                             than a briefly broken free tier.
 //   FREE_DAILY                free actions per day per install (default 30)
@@ -22,16 +22,18 @@
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const TOKEN_RE = /^[a-f0-9-]{36}$/;
 const TTL_S = 60 * 60 * 24 * 90;
+const DAY_TTL_S = 60 * 60 * 48;
 
-// Sized to the extension's legitimate traffic (40 tabs + snippets), not to
-// what a caller might wish for. Everything outside the whitelist is dropped.
+// Sized to legitimate traffic (75 tabs + snippets), not to what a caller might
+// wish for. Everything outside the whitelist is dropped.
 const LIMITS = {
-  bodyBytes: 96_000, // hard reject above this
+  bodyBytes: 96_000, // measured on the parsed body — Content-Length is a hint, not a boundary
   // Measured: typical organize prompt ~750 chars; worst legitimate case
   // (monochrome list + 2K custom instructions + many existing groups) ~4.3K.
-  systemChars: 6_000, // silent crop with headroom over the legit worst case
+  systemChars: 6_000,
   contentChars: 64_000, // ~16K tokens — 75 tabs with snippets fits with room
   contentTurns: 2,
+  schemaBytes: 8_000, // PLAN_SCHEMA is ~1-2K; a megabyte "schema" is an attack
   maxOutputTokens: 1024,
 };
 
@@ -47,6 +49,18 @@ async function kv(creds, ...cmd) {
   });
   if (!resp.ok) throw new Error(`KV ${resp.status}`);
   return (await resp.json()).result;
+}
+
+// Atomic reserve: INCR first, judge the returned value, refund on rejection or
+// upstream failure. Check-then-increment loses to concurrent bursts.
+async function reserve(creds, key, limit, ttl) {
+  const count = Number(await kv(creds, "incr", key));
+  await kv(creds, "expire", key, String(ttl)).catch(() => undefined);
+  if (count > limit) {
+    await kv(creds, "decr", key).catch(() => undefined);
+    return { ok: false, count };
+  }
+  return { ok: true, count };
 }
 
 function textOnlyParts(parts, budget) {
@@ -76,10 +90,15 @@ function sanitizeRequest(body) {
     sanitized.systemInstruction = { parts: [{ text: systemText.slice(0, LIMITS.systemChars) }] };
   }
   const cfg = body?.generationConfig || {};
+  const schemaOk =
+    cfg.responseSchema &&
+    typeof cfg.responseSchema === "object" &&
+    JSON.stringify(cfg.responseSchema).length <= LIMITS.schemaBytes;
+  if (cfg.responseSchema && !schemaOk) return null; // oversized schema is hostile, reject
   sanitized.generationConfig = {
     maxOutputTokens: LIMITS.maxOutputTokens,
     ...(cfg.responseMimeType === "application/json" ? { responseMimeType: "application/json" } : {}),
-    ...(cfg.responseSchema && typeof cfg.responseSchema === "object" ? { responseSchema: cfg.responseSchema } : {}),
+    ...(schemaOk ? { responseSchema: cfg.responseSchema } : {}),
   };
   return sanitized;
 }
@@ -100,12 +119,27 @@ export default async function handler(req, res) {
     return res.status(204).end();
   }
   if (req.method !== "POST") return res.status(404).json({ error: "Not found." });
-  if (Number(req.headers["content-length"] || 0) > LIMITS.bodyBytes) {
-    return res.status(413).json({ error: "request_too_large" });
-  }
 
   const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (!TOKEN_RE.test(token)) return res.status(401).json({ error: "Missing install token." });
+
+  // Content-Length is only a fast-path hint; the real cap is measured on the
+  // parsed body (chunked requests legally omit the header).
+  if (Number(req.headers["content-length"] || 0) > LIMITS.bodyBytes) {
+    return res.status(413).json({ error: "request_too_large" });
+  }
+  let bodyBytes = 0;
+  try {
+    bodyBytes = Buffer.byteLength(JSON.stringify(req.body ?? null), "utf8");
+  } catch {
+    return res.status(400).json({ error: "Invalid request body." });
+  }
+  if (bodyBytes > LIMITS.bodyBytes) {
+    return res.status(413).json({ error: "request_too_large" });
+  }
+
+  const sanitized = sanitizeRequest(req.body);
+  if (!sanitized) return res.status(400).json({ error: "Invalid request body." });
 
   const allowlisted = (process.env.ALLOW_TOKENS || "")
     .split(",")
@@ -120,66 +154,64 @@ export default async function handler(req, res) {
   }
 
   // Entitlement tiers: allowlisted > paid (Stripe webhook sets paid:<token>) > free.
-  // Free tier is a generous daily allowance, not a lifetime meter; the global
-  // circuit breaker (not per-token stinginess) is what bounds token farming.
-  let tier = "free";
+  // Reservations are atomic (INCR-then-judge) so concurrent bursts cannot slip
+  // past the thresholds; failed upstream calls are refunded below.
+  let tier = "unlimited";
+  let limit = Infinity;
+  let reservedKeys = [];
   let used = 0;
-  let limit = Number(process.env.FREE_DAILY || "30");
-  if (allowlisted) {
-    tier = "unlimited";
-  } else {
+  if (!allowlisted) {
     try {
-      const globalUsed = Number((await kv(creds, "get", `g:${today()}`)) || "0");
-      if (globalUsed >= Number(process.env.GLOBAL_DAILY || "3000")) {
-        return res.status(503).json({ error: "capacity", retryTomorrow: true });
-      }
+      const globalRes = await reserve(creds, `g:${today()}`, Number(process.env.GLOBAL_DAILY || "3000"), DAY_TTL_S);
+      if (!globalRes.ok) return res.status(503).json({ error: "capacity", retryTomorrow: true });
+      reservedKeys.push(`g:${today()}`);
+
       const paid = await kv(creds, "get", `paid:${token}`);
       if (paid === "active") {
         tier = "paid";
         limit = Number(process.env.PAID_MONTHLY || "1500");
-        used = Number((await kv(creds, "get", `m:${token}:${month()}`)) || "0");
-        if (used >= limit) {
-          return res.status(402).json({ error: "paid_quota_exhausted", used, limit });
+        const r = await reserve(creds, `m:${token}:${month()}`, limit, TTL_S);
+        if (!r.ok) {
+          await kv(creds, "decr", `g:${today()}`).catch(() => undefined);
+          return res.status(402).json({ error: "paid_quota_exhausted", limit });
         }
+        reservedKeys.push(`m:${token}:${month()}`);
+        used = r.count;
       } else {
-        used = Number((await kv(creds, "get", `d:${token}:${today()}`)) || "0");
-        if (used >= limit) {
+        tier = "free";
+        limit = Number(process.env.FREE_DAILY || "30");
+        const r = await reserve(creds, `d:${token}:${today()}`, limit, DAY_TTL_S);
+        if (!r.ok) {
+          await kv(creds, "decr", `g:${today()}`).catch(() => undefined);
           return res.status(429).json({ error: "daily_limit", retryTomorrow: true });
         }
+        reservedKeys.push(`d:${token}:${today()}`);
+        used = r.count;
       }
     } catch {
       return res.status(503).json({ error: "metering_unavailable" });
     }
   }
 
-  const sanitized = sanitizeRequest(req.body);
-  if (!sanitized) return res.status(400).json({ error: "Invalid request body." });
-
   const model = process.env.MODEL || "gemini-3.1-flash-lite";
-  const upstream = await fetch(`${GEMINI_BASE}/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(sanitized),
-  });
-
-  // Count only successful generations — provider outages must not burn quota.
-  if (upstream.ok && tier !== "unlimited") {
-    try {
-      if (tier === "paid") {
-        await kv(creds, "incr", `m:${token}:${month()}`);
-        await kv(creds, "expire", `m:${token}:${month()}`, String(TTL_S));
-      } else {
-        await kv(creds, "incr", `d:${token}:${today()}`);
-        await kv(creds, "expire", `d:${token}:${today()}`, String(60 * 60 * 48));
-      }
-      await kv(creds, "incr", `g:${today()}`);
-      await kv(creds, "expire", `g:${today()}`, String(60 * 60 * 48));
-    } catch {
-      // Metering write failed after a served call: log nothing, next read re-checks.
-    }
+  let upstream;
+  try {
+    upstream = await fetch(`${GEMINI_BASE}/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(sanitized),
+    });
+  } catch {
+    upstream = null;
   }
 
-  const remaining = tier === "unlimited" ? "unlimited" : String(Math.max(0, limit - used - (upstream.ok ? 1 : 0)));
+  // Refund reservations for failed generations — outages must not burn quota.
+  if ((!upstream || !upstream.ok) && reservedKeys.length) {
+    await Promise.all(reservedKeys.map((key) => kv(creds, "decr", key).catch(() => undefined)));
+  }
+  if (!upstream) return res.status(502).json({ error: "provider_unreachable" });
+
+  const remaining = tier === "unlimited" ? "unlimited" : String(Math.max(0, limit - (upstream.ok ? used : used - 1)));
   res.setHeader("x-shelve-actions-remaining", remaining);
   res.setHeader("content-type", "application/json");
   res.status(upstream.status);
