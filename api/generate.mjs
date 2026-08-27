@@ -1,23 +1,35 @@
-// Shelve free-actions proxy — Vercel serverless port of worker/src/index.ts
-// in the shelve repo. Lets new installs try AI actions with no API key.
+// Shelve hosted-actions proxy. Assume every caller is adversarial: the URL is
+// public by nature (any extension's traffic is inspectable), so safety comes
+// from server-side limits, not secrecy.
 //
 // Privacy contract (public): request bodies pass through to Gemini and are
-// never stored. Persisted state is installToken -> action count only. No
-// URLs, titles, or IPs are written.
+// never stored. Persisted state is per-token counters and entitlement flags
+// only. No URLs, titles, IPs, or request content are written.
 //
-// Env (Vercel project settings):
-//   GEMINI_API_KEY  — required, a budget-capped key
-//   KV_REST_API_URL / KV_REST_API_TOKEN — Upstash/Vercel KV REST creds.
-//     Missing KV fails OPEN (unmetered) so the free tier never bricks;
-//     the Gemini budget cap is the backstop. A warning is logged.
-//   FREE_ACTIONS    — default "25"
-//   MODEL           — default "gemini-3.1-flash-lite"
-//   ALLOW_TOKENS    — comma-separated install tokens with unlimited use
-//                     (owner + friends)
+// Env:
+//   GEMINI_API_KEY            required, budget-capped key
+//   KV_REST_API_URL/TOKEN     Upstash REST (Vercel KV). Missing KV now fails
+//                             CLOSED (503) — an unmetered open proxy is worse
+//                             than a briefly broken free tier.
+//   FREE_ACTIONS              lifetime free actions per install (default 10)
+//   FREE_DAILY                free actions per day per install (default 6)
+//   PAID_MONTHLY              actions per month for paid tokens (default 1500)
+//   ALLOW_TOKENS              comma-separated unlimited tokens (owner+friends)
+//   MODEL                     pinned model (default gemini-3.1-flash-lite)
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const TOKEN_RE = /^[a-f0-9-]{36}$/;
 const TTL_S = 60 * 60 * 24 * 90;
+
+// Sized to the extension's legitimate traffic (40 tabs + snippets), not to
+// what a caller might wish for. Everything outside the whitelist is dropped.
+const LIMITS = {
+  bodyBytes: 64_000, // hard reject above this
+  systemChars: 4_000, // silent crop — organize prompts are ~2-3K
+  contentChars: 48_000, // ~12K tokens of tab titles/URLs/snippets
+  contentTurns: 2,
+  maxOutputTokens: 1024,
+};
 
 function kvCreds() {
   const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
@@ -25,14 +37,55 @@ function kvCreds() {
   return url && token ? { url, token } : null;
 }
 
-async function kv(cmd) {
-  const creds = kvCreds();
-  if (!creds) return null;
-  const resp = await fetch(`${creds.url}/${cmd.join("/")}`, {
+async function kv(creds, ...cmd) {
+  const resp = await fetch(`${creds.url}/${cmd.map(encodeURIComponent).join("/")}`, {
     headers: { Authorization: `Bearer ${creds.token}` },
   });
-  if (!resp.ok) throw new Error(`KV error ${resp.status}`);
+  if (!resp.ok) throw new Error(`KV ${resp.status}`);
   return (await resp.json()).result;
+}
+
+function textOnlyParts(parts, budget) {
+  const out = [];
+  for (const part of Array.isArray(parts) ? parts : []) {
+    if (typeof part?.text !== "string") continue; // drops inlineData/fileData/etc.
+    out.push({ text: part.text.slice(0, budget.remaining) });
+    budget.remaining -= out[out.length - 1].text.length;
+    if (budget.remaining <= 0) break;
+  }
+  return out;
+}
+
+// Rebuild the request from a strict whitelist — unknown fields (tools, cached
+// content, media parts, generation knobs) never reach Gemini.
+function sanitizeRequest(body) {
+  const budget = { remaining: LIMITS.contentChars };
+  const contents = (Array.isArray(body?.contents) ? body.contents : [])
+    .slice(0, LIMITS.contentTurns)
+    .map((turn) => ({ role: turn?.role === "model" ? "model" : "user", parts: textOnlyParts(turn?.parts, budget) }))
+    .filter((turn) => turn.parts.length > 0);
+  if (!contents.length) return null;
+
+  const sanitized = { contents };
+  const systemText = body?.systemInstruction?.parts?.map((p) => (typeof p?.text === "string" ? p.text : "")).join("\n");
+  if (systemText) {
+    sanitized.systemInstruction = { parts: [{ text: systemText.slice(0, LIMITS.systemChars) }] };
+  }
+  const cfg = body?.generationConfig || {};
+  sanitized.generationConfig = {
+    maxOutputTokens: LIMITS.maxOutputTokens,
+    ...(cfg.responseMimeType === "application/json" ? { responseMimeType: "application/json" } : {}),
+    ...(cfg.responseSchema && typeof cfg.responseSchema === "object" ? { responseSchema: cfg.responseSchema } : {}),
+  };
+  return sanitized;
+}
+
+function today() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function month() {
+  return new Date().toISOString().slice(0, 7);
 }
 
 export default async function handler(req, res) {
@@ -43,52 +96,88 @@ export default async function handler(req, res) {
     return res.status(204).end();
   }
   if (req.method !== "POST") return res.status(404).json({ error: "Not found." });
+  if (Number(req.headers["content-length"] || 0) > LIMITS.bodyBytes) {
+    return res.status(413).json({ error: "request_too_large" });
+  }
 
   const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (!TOKEN_RE.test(token)) return res.status(401).json({ error: "Missing install token." });
 
-  const limit = Number(process.env.FREE_ACTIONS || "25");
   const allowlisted = (process.env.ALLOW_TOKENS || "")
     .split(",")
     .map((t) => t.trim())
     .filter(Boolean)
     .includes(token);
 
+  const creds = kvCreds();
+  if (!creds && !allowlisted) {
+    // Fail closed: no metering means no service, never an open faucet.
+    return res.status(503).json({ error: "metering_unavailable" });
+  }
+
+  // Entitlement tiers: allowlisted > paid (Stripe webhook sets paid:<token>) > free.
+  let tier = "free";
   let used = 0;
-  let metered = false;
-  if (!allowlisted) {
+  let limit = Number(process.env.FREE_ACTIONS || "10");
+  if (allowlisted) {
+    tier = "unlimited";
+  } else {
     try {
-      const stored = await kv(["get", token]);
-      metered = stored !== null || kvCreds() !== null;
-      used = Number(stored || "0");
-    } catch (err) {
-      console.warn("metering unavailable, failing open:", err.message);
+      const paid = await kv(creds, "get", `paid:${token}`);
+      if (paid === "active") {
+        tier = "paid";
+        limit = Number(process.env.PAID_MONTHLY || "1500");
+        used = Number((await kv(creds, "get", `m:${token}:${month()}`)) || "0");
+      } else {
+        const [lifetime, daily] = await Promise.all([
+          kv(creds, "get", token),
+          kv(creds, "get", `d:${token}:${today()}`),
+        ]);
+        used = Number(lifetime || "0");
+        const dailyUsed = Number(daily || "0");
+        const dailyLimit = Number(process.env.FREE_DAILY || "6");
+        if (dailyUsed >= dailyLimit && used < limit) {
+          return res.status(429).json({ error: "daily_limit", retryTomorrow: true });
+        }
+      }
+    } catch {
+      return res.status(503).json({ error: "metering_unavailable" });
     }
     if (used >= limit) {
-      return res.status(402).json({ error: "free_actions_exhausted", used, limit });
+      return res.status(402).json({ error: tier === "paid" ? "paid_quota_exhausted" : "free_actions_exhausted", used, limit });
     }
   }
+
+  const sanitized = sanitizeRequest(req.body);
+  if (!sanitized) return res.status(400).json({ error: "Invalid request body." });
 
   const model = process.env.MODEL || "gemini-3.1-flash-lite";
   const upstream = await fetch(`${GEMINI_BASE}/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(req.body),
+    body: JSON.stringify(sanitized),
   });
 
-  // Count only successful generations — provider outages must not burn actions.
-  if (upstream.ok && !allowlisted && metered) {
+  // Count only successful generations — provider outages must not burn quota.
+  if (upstream.ok && tier !== "unlimited") {
     try {
-      await kv(["incr", token]);
-      await kv(["expire", token, String(TTL_S)]);
-    } catch (err) {
-      console.warn("metering incr failed:", err.message);
+      if (tier === "paid") {
+        await kv(creds, "incr", `m:${token}:${month()}`);
+        await kv(creds, "expire", `m:${token}:${month()}`, String(TTL_S));
+      } else {
+        await kv(creds, "incr", token);
+        await kv(creds, "expire", token, String(TTL_S));
+        await kv(creds, "incr", `d:${token}:${today()}`);
+        await kv(creds, "expire", `d:${token}:${today()}`, String(60 * 60 * 48));
+      }
+    } catch {
+      // Metering write failed after a served call: log nothing, next read re-checks.
     }
   }
 
-  const remaining = allowlisted ? limit : Math.max(0, limit - used - (upstream.ok ? 1 : 0));
-  res.setHeader("x-shelve-actions-remaining", String(remaining));
-  res.status(upstream.status);
+  const remaining = tier === "unlimited" ? "unlimited" : String(Math.max(0, limit - used - (upstream.ok ? 1 : 0)));
+  res.setHeader("x-shelve-actions-remaining", remaining);
   res.setHeader("content-type", "application/json");
+  res.status(upstream.status);
   return res.send(await upstream.text());
 }
