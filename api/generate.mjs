@@ -3,8 +3,9 @@
 // from server-side limits, not secrecy.
 //
 // Privacy contract (public, mirrored in /privacy): request bodies pass through
-// to Gemini and are never stored. Persisted state is per-token counters and
-// entitlement flags only. No URLs, titles, IPs, or request content are written.
+// to Gemini and are never stored. Persisted state is per-token counters,
+// entitlement flags, and aggregate daily totals (action and token counts)
+// only. No URLs, titles, IPs, or request content are written.
 //
 // Env:
 //   GEMINI_API_KEY            required, budget-capped key
@@ -23,6 +24,7 @@ const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const TOKEN_RE = /^[a-f0-9-]{36}$/;
 const TTL_S = 60 * 60 * 24 * 90;
 const DAY_TTL_S = 60 * 60 * 48;
+const STATS_TTL_S = 60 * 60 * 24 * 35; // admin dashboard reads the last 30 days
 
 // Sized to legitimate traffic (75 tabs + snippets), not to what a caller might
 // wish for. Everything outside the whitelist is dropped.
@@ -49,6 +51,43 @@ async function kv(creds, ...cmd) {
   });
   if (!resp.ok) throw new Error(`KV ${resp.status}`);
   return (await resp.json()).result;
+}
+
+// One round trip for a batch of commands (Upstash REST /pipeline).
+async function kvPipeline(creds, commands) {
+  const resp = await fetch(`${creds.url}/pipeline`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${creds.token}` },
+    body: JSON.stringify(commands),
+  });
+  if (!resp.ok) throw new Error(`KV ${resp.status}`);
+  return resp.json();
+}
+
+// Owner cost visibility, within the privacy contract above: AGGREGATE numbers
+// only — per-day action and token totals, plus the set of anonymous install
+// tokens (which KV already holds as counter keys). Never URLs, titles, IPs, or
+// request/response content. Failures are swallowed; stats must not break
+// generation.
+async function recordAggregateStats(creds, token, responseText) {
+  let usage;
+  try {
+    usage = JSON.parse(responseText)?.usageMetadata;
+  } catch {
+    usage = null;
+  }
+  const input = Number(usage?.promptTokenCount) || 0;
+  const output = Number(usage?.candidatesTokenCount) || 0;
+  const day = today();
+  await kvPipeline(creds, [
+    ["incr", `s:a:${day}`],
+    ["expire", `s:a:${day}`, String(STATS_TTL_S)],
+    ["incrby", `s:i:${day}`, String(input)],
+    ["expire", `s:i:${day}`, String(STATS_TTL_S)],
+    ["incrby", `s:o:${day}`, String(output)],
+    ["expire", `s:o:${day}`, String(STATS_TTL_S)],
+    ["sadd", "s:installs", token],
+  ]);
 }
 
 // Atomic reserve: INCR first, judge the returned value, refund on rejection or
@@ -211,9 +250,16 @@ export default async function handler(req, res) {
   }
   if (!upstream) return res.status(502).json({ error: "provider_unreachable" });
 
+  const responseText = await upstream.text();
+  // Await (don't fire-and-forget): the serverless runtime may freeze right
+  // after the response is sent, dropping in-flight KV writes.
+  if (upstream.ok && creds) {
+    await recordAggregateStats(creds, token, responseText).catch(() => undefined);
+  }
+
   const remaining = tier === "unlimited" ? "unlimited" : String(Math.max(0, limit - (upstream.ok ? used : used - 1)));
   res.setHeader("x-shelve-actions-remaining", remaining);
   res.setHeader("content-type", "application/json");
   res.status(upstream.status);
-  return res.send(await upstream.text());
+  return res.send(responseText);
 }
