@@ -126,6 +126,9 @@ export default async function handler(req, res) {
       text,
     }),
   });
-  if (!mail.ok) return res.status(502).json({ error: "email_failed", status: mail.status });
+  if (!mail.ok) {
+    const detail = await mail.text().catch(() => "");
+    return res.status(502).json({ error: "email_failed", status: mail.status, detail: detail.slice(0, 300) });
+  }
   return res.status(200).json({ sent: true, day: yday, actions, alerts: alerts.length });
 }
