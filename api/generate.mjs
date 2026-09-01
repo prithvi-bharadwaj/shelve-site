@@ -237,6 +237,9 @@ function month() {
 
 export default async function handler(req, res) {
   res.setHeader("access-control-allow-origin", "*");
+  // The extension reads the quota header cross-origin (no host permission for
+  // this domain in the manifest) — without expose-headers it comes back null.
+  res.setHeader("access-control-expose-headers", "x-shelve-actions-remaining");
   if (req.method === "OPTIONS") {
     res.setHeader("access-control-allow-methods", "POST");
     res.setHeader("access-control-allow-headers", "authorization,content-type");
