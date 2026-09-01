@@ -1,5 +1,6 @@
 {
   "cleanUrls": true,
   "trailingSlash": false,
-  "crons": [{ "path": "/api/daily-report", "schedule": "0 15 * * *" }]
+  "crons": [{ "path": "/api/daily-report", "schedule": "0 15 * * *" }],
+  "redirects": [{ "source": "/", "destination": "https://shelve-landing.vercel.app", "permanent": false }]
 }
