@@ -13,9 +13,13 @@ jobs:
     steps:
       - name: POST /api/generate without a token (expect 401 JSON, never 403)
         run: |
+          # tryshelve.com covers pre-0.7 clients (rewrite through the landing
+          # project); shelve-api is what updated extensions call directly.
+          for host in https://shelve-api.vercel.app https://tryshelve.com; do
           status=$(curl -s -o /tmp/body -w "%{http_code}" --max-time 30 \
-            -X POST https://tryshelve.com/api/generate \
+            -X POST "$host/api/generate" \
             -H "Content-Type: application/json" -d '{}')
+          echo "host=$host"
           echo "status=$status"
           head -c 300 /tmp/body; echo
           if [ "$status" = "403" ]; then
@@ -27,6 +31,7 @@ jobs:
             exit 1
           fi
           if [ "$status" != "401" ]; then
-            echo "::error::Unexpected status $status (expected 401 for missing token)."
+            echo "::error::Unexpected status $status from $host (expected 401 for missing token)."
             exit 1
           fi
+          done
