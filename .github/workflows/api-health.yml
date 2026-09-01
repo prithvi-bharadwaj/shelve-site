@@ -1,0 +1,32 @@
+# Alerts (via GitHub's failed-workflow email) if the free-tier proxy starts
+# returning 403 challenge pages again — extension users only ever see a generic
+# error, so this is the early-warning system.
+name: API health
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/generate without a token (expect 401 JSON, never 403)
+        run: |
+          status=$(curl -s -o /tmp/body -w "%{http_code}" --max-time 30 \
+            -X POST https://tryshelve.com/api/generate \
+            -H "Content-Type: application/json" -d '{}')
+          echo "status=$status"
+          head -c 300 /tmp/body; echo
+          if [ "$status" = "403" ]; then
+            echo "::error::403 from /api/generate — likely Vercel Attack Challenge Mode. Disable: POST https://api.vercel.com/v1/security/attack-mode?teamId=<team> {\"projectId\":\"...\",\"attackModeEnabled\":false}"
+            exit 1
+          fi
+          if grep -qi "security checkpoint" /tmp/body; then
+            echo "::error::Challenge page detected in response body."
+            exit 1
+          fi
+          if [ "$status" != "401" ]; then
+            echo "::error::Unexpected status $status (expected 401 for missing token)."
+            exit 1
+          fi
