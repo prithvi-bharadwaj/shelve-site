@@ -12,6 +12,7 @@
 import { timingSafeEqual } from "node:crypto";
 
 const PRICES = {
+  "gemini-3.8-flash": [0.75, 3.75],
   "gemini-3.1-flash-lite": [0.25, 1.5],
   "gemini-2.5-flash-lite": [0.1, 0.4],
   "gemini-2.5-flash": [0.3, 2.5],
@@ -51,7 +52,7 @@ function dayString(offset) {
 }
 
 function costUsd(input, output, model) {
-  const price = PRICES[model] || PRICES["gemini-3.1-flash-lite"];
+  const price = PRICES[model] || PRICES["gemini-3.8-flash"];
   return (input / 1e6) * price[0] + (output / 1e6) * price[1];
 }
 
@@ -86,7 +87,7 @@ export default async function handler(req, res) {
   const actions = Number(dayRes?.[0]) || 0;
   const inputTokens = Number(dayRes?.[1]) || 0;
   const outputTokens = Number(dayRes?.[2]) || 0;
-  const model = dayRes?.[3] || process.env.MODEL || "gemini-3.1-flash-lite";
+  const model = dayRes?.[3] || process.env.MODEL || "gemini-3.8-flash";
   const uniques = Number(uniqRes) || 0;
   const uniques7d = Array.isArray(weekRes) ? weekRes.length : 0;
   const monthSpendUsd = (Number(spendRes?.[0]) || 0) / 1e6;

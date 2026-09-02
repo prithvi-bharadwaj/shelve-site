@@ -10,12 +10,13 @@ import { timingSafeEqual } from "node:crypto";
 // USD per million input/output tokens by model. Days recorded with a model
 // missing from this map report tokens with a null cost rather than a wrong one.
 const PRICES = {
+  "gemini-3.8-flash": [0.75, 3.75],
   "gemini-3.1-flash-lite": [0.25, 1.5],
   "gemini-2.5-flash-lite": [0.1, 0.4],
   "gemini-2.5-flash": [0.3, 2.5],
   "gemini-3.5-flash": [1.5, 9],
 };
-const DEFAULT_MODEL = "gemini-3.1-flash-lite";
+const DEFAULT_MODEL = "gemini-3.8-flash";
 const DAYS = 30;
 
 function kvCreds() {

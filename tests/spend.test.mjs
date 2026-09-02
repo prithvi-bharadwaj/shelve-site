@@ -12,8 +12,13 @@ test("token counts convert to integer micro-USD at the model's price", () => {
 test("unknown models fall back to the default price instead of free", () => {
   assert.equal(
     estimateMicroUsd(1000, 1000, "gemini-9000"),
-    estimateMicroUsd(1000, 1000, "gemini-3.1-flash-lite")
+    estimateMicroUsd(1000, 1000, "gemini-3.8-flash")
   );
+});
+
+test("gemini-3.8-flash is priced at the intro rate", () => {
+  // 1M in at $0.75 + 1M out at $3.75 = $4.50
+  assert.equal(estimateMicroUsd(1_000_000, 1_000_000, "gemini-3.8-flash"), 4_500_000);
 });
 
 test("rounds up so spend never undercounts", () => {
