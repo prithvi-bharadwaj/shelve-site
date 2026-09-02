@@ -16,7 +16,7 @@ const PRICES = {
   "gemini-2.5-flash": [0.3, 2.5],
   "gemini-3.5-flash": [1.5, 9],
 };
-const DEFAULT_MODEL = "gemini-3.8-flash";
+const DEFAULT_MODEL = "gemini-3.1-flash-lite";
 const DAYS = 30;
 
 function kvCreds() {

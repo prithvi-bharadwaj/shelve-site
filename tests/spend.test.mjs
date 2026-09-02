@@ -12,7 +12,7 @@ test("token counts convert to integer micro-USD at the model's price", () => {
 test("unknown models fall back to the default price instead of free", () => {
   assert.equal(
     estimateMicroUsd(1000, 1000, "gemini-9000"),
-    estimateMicroUsd(1000, 1000, "gemini-3.8-flash")
+    estimateMicroUsd(1000, 1000, "gemini-3.1-flash-lite")
   );
 });
 

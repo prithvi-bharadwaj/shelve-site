@@ -52,7 +52,7 @@ function dayString(offset) {
 }
 
 function costUsd(input, output, model) {
-  const price = PRICES[model] || PRICES["gemini-3.8-flash"];
+  const price = PRICES[model] || PRICES["gemini-3.1-flash-lite"];
   return (input / 1e6) * price[0] + (output / 1e6) * price[1];
 }
 
@@ -87,7 +87,7 @@ export default async function handler(req, res) {
   const actions = Number(dayRes?.[0]) || 0;
   const inputTokens = Number(dayRes?.[1]) || 0;
   const outputTokens = Number(dayRes?.[2]) || 0;
-  const model = dayRes?.[3] || process.env.MODEL || "gemini-3.8-flash";
+  const model = dayRes?.[3] || process.env.MODEL || "gemini-3.1-flash-lite";
   const uniques = Number(uniqRes) || 0;
   const uniques7d = Array.isArray(weekRes) ? weekRes.length : 0;
   const monthSpendUsd = (Number(spendRes?.[0]) || 0) / 1e6;

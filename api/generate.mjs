@@ -18,10 +18,10 @@
 //                             farming, since per-token caps can't stop minting
 //   PAID_MONTHLY              actions per month for paid tokens (default 1500)
 //   ALLOW_TOKENS              comma-separated unlimited tokens (owner+friends)
-//   MODEL                     pinned model (default gemini-3.8-flash)
+//   MODEL                     pinned model (default gemini-3.1-flash-lite)
 //   MODEL_FALLBACK            model tried on the same key when MODEL returns
 //                             429/5xx/network error (default
-//                             gemini-3.1-flash-lite; set empty to disable)
+//                             gemini-2.5-flash-lite; set empty to disable)
 //   SPEND_MONTHLY_USD         hard stop on estimated Gemini spend per calendar
 //                             month (default 10). Applies to every caller,
 //                             allowlisted included — it protects the key.
@@ -55,7 +55,7 @@ const LIMITS = {
 // USD per million input/output tokens. token count × price-per-Mtok = micro-USD,
 // so spend accumulates in KV as integer microdollars with no float drift.
 const SPEND_PRICES = {
-  "gemini-3.8-flash": [0.75, 3.75], // intro pricing; doubles 2027-01-01
+  "gemini-3.8-flash": [0.75, 3.75], // intro pricing; doubles 2027-01-01. Not default: 3x lite + thinking tokens
   "gemini-3.1-flash-lite": [0.25, 1.5],
   "gemini-2.5-flash-lite": [0.1, 0.4],
   "gemini-2.5-flash": [0.3, 2.5],
@@ -63,7 +63,7 @@ const SPEND_PRICES = {
 };
 
 export function estimateMicroUsd(inputTokens, outputTokens, model) {
-  const [inPrice, outPrice] = SPEND_PRICES[model] || SPEND_PRICES["gemini-3.8-flash"];
+  const [inPrice, outPrice] = SPEND_PRICES[model] || SPEND_PRICES["gemini-3.1-flash-lite"];
   return Math.ceil(inputTokens * inPrice + outputTokens * outPrice);
 }
 
@@ -372,8 +372,8 @@ export default async function handler(req, res) {
     }
   }
 
-  const model = process.env.MODEL || "gemini-3.8-flash";
-  const fallbackModel = process.env.MODEL_FALLBACK ?? "gemini-3.1-flash-lite";
+  const model = process.env.MODEL || "gemini-3.1-flash-lite";
+  const fallbackModel = process.env.MODEL_FALLBACK ?? "gemini-2.5-flash-lite";
   let servedModel = model;
   let upstream = await callGemini(model, sanitized, process.env.GEMINI_API_KEY);
 
