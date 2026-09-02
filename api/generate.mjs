@@ -19,6 +19,9 @@
 //   PAID_MONTHLY              actions per month for paid tokens (default 1500)
 //   ALLOW_TOKENS              comma-separated unlimited tokens (owner+friends)
 //   MODEL                     pinned model (default gemini-3.8-flash)
+//   MODEL_FALLBACK            model tried on the same key when MODEL returns
+//                             429/5xx/network error (default
+//                             gemini-3.1-flash-lite; set empty to disable)
 //   SPEND_MONTHLY_USD         hard stop on estimated Gemini spend per calendar
 //                             month (default 10). Applies to every caller,
 //                             allowlisted included — it protects the key.
@@ -94,7 +97,7 @@ async function kvPipeline(creds, commands) {
 // tokens (which KV already holds as counter keys). Never URLs, titles, IPs, or
 // request/response content. Failures are swallowed; stats must not break
 // generation.
-async function recordAggregateStats(creds, token, responseText) {
+async function recordAggregateStats(creds, token, responseText, servedModel) {
   let usage;
   try {
     usage = JSON.parse(responseText)?.usageMetadata;
@@ -104,7 +107,7 @@ async function recordAggregateStats(creds, token, responseText) {
   const input = Number(usage?.promptTokenCount) || 0;
   const output = Number(usage?.candidatesTokenCount) || 0;
   const day = today();
-  const micro = estimateMicroUsd(input, output, process.env.MODEL || "gemini-3.8-flash");
+  const micro = estimateMicroUsd(input, output, servedModel);
   await kvPipeline(creds, [
     // Running spend estimate, read by the budget gate below and the daily
     // report. Monthly key outlives the stats window; total never expires.
@@ -123,7 +126,7 @@ async function recordAggregateStats(creds, token, responseText) {
     ["expire", `s:u:${day}`, String(STATS_TTL_S)],
     // Day-granular model marker so the dashboard prices tokens correctly even
     // if the MODEL env changes mid-window.
-    ["set", `s:mdl:${day}`, process.env.MODEL || "gemini-3.8-flash"],
+    ["set", `s:mdl:${day}`, servedModel],
     ["expire", `s:mdl:${day}`, String(STATS_TTL_S)],
   ]);
 }
@@ -185,6 +188,12 @@ function sanitizeRequest(body) {
 // request's fault, not the key's — never retried.
 export function failoverWorthy(status) {
   return status === null || status === 401 || status === 403 || status === 429 || status >= 500;
+}
+
+// Capacity/outage failures a different *model* can absorb. Auth failures are
+// excluded: a dead key is dead for every model, so only the backup key helps.
+export function capacityFailure(status) {
+  return status === null || status === 429 || status >= 500;
 }
 
 // Gemini reports a dead, revoked or mistyped key as 400 API_KEY_INVALID — the
@@ -364,7 +373,22 @@ export default async function handler(req, res) {
   }
 
   const model = process.env.MODEL || "gemini-3.8-flash";
+  const fallbackModel = process.env.MODEL_FALLBACK ?? "gemini-3.1-flash-lite";
+  let servedModel = model;
   let upstream = await callGemini(model, sanitized, process.env.GEMINI_API_KEY);
+
+  // Model-level outage (launch-day "high demand" 503s, regional 5xx, per-model
+  // 429): retry on the same key with the fallback model before blaming the key.
+  if (fallbackModel && fallbackModel !== model && capacityFailure(upstream ? upstream.status : null)) {
+    const failedStatus = upstream ? upstream.status : "network error";
+    const second = await callGemini(fallbackModel, sanitized, process.env.GEMINI_API_KEY);
+    if (second && !capacityFailure(second.status)) {
+      upstream = second;
+      servedModel = fallbackModel;
+      await boundedAlert(creds, "model_fallback", `${model} returned ${failedStatus}; ${fallbackModel} served the request. Users are unaffected, but the primary model is degraded.`);
+    }
+  }
+
   let servedByBackup = false;
   const backupKey = process.env.GEMINI_API_KEY_BACKUP;
   if (backupKey && failoverWorthy(upstream ? upstream.status : null)) {
@@ -373,6 +397,7 @@ export default async function handler(req, res) {
     if (second) upstream = second;
     servedByBackup = Boolean(second?.ok);
     if (servedByBackup) {
+      servedModel = model;
       await boundedAlert(creds, "key_failover", `The primary Gemini key failed (${failedStatus}); the backup key served the request. Users are unaffected, but check the primary key.`);
     }
   }
@@ -416,7 +441,7 @@ export default async function handler(req, res) {
   // client-visible stall.
   if (upstream.ok && creds) {
     await Promise.race([
-      recordAggregateStats(creds, token, responseText).catch(() => undefined),
+      recordAggregateStats(creds, token, responseText, servedModel).catch(() => undefined),
       new Promise((resolve) => setTimeout(resolve, 1500)),
     ]);
   }

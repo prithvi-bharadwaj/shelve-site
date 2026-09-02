@@ -21,6 +21,7 @@ Landing page, privacy policy, and the serverless relay for [Shelve](https://gith
 | `ALLOW_TOKENS` | Comma-separated install tokens with unlimited actions (owner + friends) |
 | `FREE_DAILY` / `GLOBAL_DAILY` / `PAID_MONTHLY` | Quota knobs (defaults 30 / 3000 / 1500) |
 | `MODEL` | Pinned Gemini model (default `gemini-3.8-flash`) |
+| `MODEL_FALLBACK` | Model retried on the same key when `MODEL` returns 429/5xx (default `gemini-3.1-flash-lite`; empty disables). A `model_fallback` alert email fires once a day when it engages |
 | `SPEND_MONTHLY_USD` / `SPEND_TOTAL_USD` | Hard stops on *estimated* Gemini spend (defaults 10 / 100). When either is hit the proxy returns the tier-neutral `capacity` error until the month rolls over / the cap is raised. Applies to allowlisted tokens too — it protects the key, not fairness. |
 | `CRON_SECRET` | Vercel Cron auth for `/api/daily-report` (Vercel sends it automatically once set) |
 | `RESEND_API_KEY` / `REPORT_EMAIL` | Resend key + destination for the daily usage email; `REPORT_FROM` optional |
