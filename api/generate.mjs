@@ -18,7 +18,7 @@
 //                             farming, since per-token caps can't stop minting
 //   PAID_MONTHLY              actions per month for paid tokens (default 1500)
 //   ALLOW_TOKENS              comma-separated unlimited tokens (owner+friends)
-//   MODEL                     pinned model (default gemini-3.1-flash-lite)
+//   MODEL                     pinned model (default gemini-3.8-flash)
 //   SPEND_MONTHLY_USD         hard stop on estimated Gemini spend per calendar
 //                             month (default 10). Applies to every caller,
 //                             allowlisted included — it protects the key.
@@ -52,6 +52,7 @@ const LIMITS = {
 // USD per million input/output tokens. token count × price-per-Mtok = micro-USD,
 // so spend accumulates in KV as integer microdollars with no float drift.
 const SPEND_PRICES = {
+  "gemini-3.8-flash": [0.75, 3.75], // intro pricing; doubles 2027-01-01
   "gemini-3.1-flash-lite": [0.25, 1.5],
   "gemini-2.5-flash-lite": [0.1, 0.4],
   "gemini-2.5-flash": [0.3, 2.5],
@@ -59,7 +60,7 @@ const SPEND_PRICES = {
 };
 
 export function estimateMicroUsd(inputTokens, outputTokens, model) {
-  const [inPrice, outPrice] = SPEND_PRICES[model] || SPEND_PRICES["gemini-3.1-flash-lite"];
+  const [inPrice, outPrice] = SPEND_PRICES[model] || SPEND_PRICES["gemini-3.8-flash"];
   return Math.ceil(inputTokens * inPrice + outputTokens * outPrice);
 }
 
@@ -103,7 +104,7 @@ async function recordAggregateStats(creds, token, responseText) {
   const input = Number(usage?.promptTokenCount) || 0;
   const output = Number(usage?.candidatesTokenCount) || 0;
   const day = today();
-  const micro = estimateMicroUsd(input, output, process.env.MODEL || "gemini-3.1-flash-lite");
+  const micro = estimateMicroUsd(input, output, process.env.MODEL || "gemini-3.8-flash");
   await kvPipeline(creds, [
     // Running spend estimate, read by the budget gate below and the daily
     // report. Monthly key outlives the stats window; total never expires.
@@ -122,7 +123,7 @@ async function recordAggregateStats(creds, token, responseText) {
     ["expire", `s:u:${day}`, String(STATS_TTL_S)],
     // Day-granular model marker so the dashboard prices tokens correctly even
     // if the MODEL env changes mid-window.
-    ["set", `s:mdl:${day}`, process.env.MODEL || "gemini-3.1-flash-lite"],
+    ["set", `s:mdl:${day}`, process.env.MODEL || "gemini-3.8-flash"],
     ["expire", `s:mdl:${day}`, String(STATS_TTL_S)],
   ]);
 }
@@ -186,14 +187,26 @@ export function failoverWorthy(status) {
   return status === null || status === 401 || status === 403 || status === 429 || status >= 500;
 }
 
+// Gemini reports a dead, revoked or mistyped key as 400 API_KEY_INVALID — the
+// same status as a malformed request. Fold it into 401 so the key-failure path
+// (failover, alert, refund, tier-neutral 503) treats it like any other auth error
+// instead of leaking Google's wording to the user and burning their quota.
+export function normalizeGeminiStatus(status, bodyText) {
+  if (status === 400 && /"reason":\s*"API_KEY_INVALID"/.test(bodyText || "")) return 401;
+  return status;
+}
+
 async function callGemini(model, body, key) {
   try {
-    return await fetch(`${GEMINI_BASE}/${model}:generateContent`, {
+    const resp = await fetch(`${GEMINI_BASE}/${model}:generateContent`, {
       method: "POST",
       // Key travels in a header, not the URL — URLs leak into logs.
       headers: { "content-type": "application/json", "x-goog-api-key": key },
       body: JSON.stringify(body),
     });
+    const text = await resp.text();
+    const status = normalizeGeminiStatus(resp.status, text);
+    return { ok: status >= 200 && status < 300, status, text };
   } catch {
     return null;
   }
@@ -350,7 +363,7 @@ export default async function handler(req, res) {
     }
   }
 
-  const model = process.env.MODEL || "gemini-3.1-flash-lite";
+  const model = process.env.MODEL || "gemini-3.8-flash";
   let upstream = await callGemini(model, sanitized, process.env.GEMINI_API_KEY);
   let servedByBackup = false;
   const backupKey = process.env.GEMINI_API_KEY_BACKUP;
@@ -396,7 +409,7 @@ export default async function handler(req, res) {
     }
   }
 
-  const responseText = await upstream.text();
+  const responseText = upstream.text;
   // Await (don't fire-and-forget): the serverless runtime may freeze right
   // after the response is sent, dropping in-flight KV writes. But bound it —
   // best-effort telemetry must never turn a successful generation into a

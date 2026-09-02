@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { failoverWorthy } from "../api/generate.mjs";
+import { failoverWorthy, normalizeGeminiStatus } from "../api/generate.mjs";
 
 test("key-level failures are failover-worthy", () => {
   for (const status of [null, 401, 403, 429, 500, 503]) {
@@ -12,4 +12,15 @@ test("request-level failures and successes are not", () => {
   for (const status of [200, 400, 404, 413]) {
     assert.equal(failoverWorthy(status), false, String(status));
   }
+});
+
+test("a 400 API_KEY_INVALID from Gemini is a key failure, not a request failure", () => {
+  const dead = JSON.stringify({ error: { code: 400, status: "INVALID_ARGUMENT", details: [{ reason: "API_KEY_INVALID" }] } });
+  assert.equal(normalizeGeminiStatus(400, dead), 401);
+  assert.equal(failoverWorthy(normalizeGeminiStatus(400, dead)), true);
+  // Other 400s (malformed request) stay 400 and still burn quota.
+  const malformed = JSON.stringify({ error: { code: 400, status: "INVALID_ARGUMENT", message: "bad schema" } });
+  assert.equal(normalizeGeminiStatus(400, malformed), 400);
+  assert.equal(normalizeGeminiStatus(200, "{}"), 200);
+  assert.equal(normalizeGeminiStatus(503, ""), 503);
 });
