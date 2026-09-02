@@ -1,6 +1,10 @@
 # Alerts (via GitHub's failed-workflow email) if the free-tier proxy starts
-# returning 403 challenge pages again — extension users only ever see a generic
-# error, so this is the early-warning system.
+# returning 403 challenge pages again, or if a real generation stops working
+# (dead Gemini key, wrong model id, KV outage) — extension users only ever see
+# a generic error, so this is the early-warning system.
+#
+# HEALTH_TOKEN is a GitHub secret: an install token that is also in the Vercel
+# ALLOW_TOKENS list, so the 144 probes/day are never metered.
 name: API health
 on:
   schedule:
@@ -35,3 +39,27 @@ jobs:
             exit 1
           fi
           done
+
+      - name: POST /api/generate with the allowlisted probe token (expect 200 + candidates)
+        env:
+          HEALTH_TOKEN: ${{ secrets.HEALTH_TOKEN }}
+        run: |
+          if [ -z "$HEALTH_TOKEN" ]; then
+            echo "::error::HEALTH_TOKEN secret is not set."
+            exit 1
+          fi
+          status=$(curl -s -o /tmp/gen -w "%{http_code}" --max-time 60 \
+            -X POST "https://shelve-api.vercel.app/api/generate" \
+            -H "Authorization: Bearer $HEALTH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"contents":[{"role":"user","parts":[{"text":"Reply with the single word ok."}]}]}')
+          echo "status=$status"
+          head -c 300 /tmp/gen; echo
+          if [ "$status" != "200" ]; then
+            echo "::error::Generation probe returned $status. 503 capacity = dead key or spend cap; 400 = model id / request rejected; 503 metering_unavailable = KV down."
+            exit 1
+          fi
+          if ! grep -q '"candidates"' /tmp/gen; then
+            echo "::error::200 without candidates — Gemini returned an unexpected body."
+            exit 1
+          fi
